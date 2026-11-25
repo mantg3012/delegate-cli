@@ -247,7 +247,8 @@ try {
         // the window title is "<conversation> - <project>"; refuse to send work for one repo into another repo's chat
         const want = targetProject(o.project); // dies when the directory belongs to no project
         const has = projects().find(x => before.conversation.endsWith(' - ' + x.name));
-        if (has && has.name !== want.name) die(`open conversation is in project "${has.name}", not "${want.name}". Use --new, ag open <id>, or --project keep`);
+        if (before.url === '/') await selectProject(c, want.name); // new-chat page: make sure it is this repo's project
+        else if (has && has.name !== want.name) die(`open conversation is in project "${has.name}", not "${want.name}". Use --new, ag open <id>, or --project keep`);
       }
       const prevAgents = await c.run(S => document.querySelectorAll(S.agent).length);
       await c.run(S => { const i = document.querySelector(S.input); if (!i) throw new Error('input not found'); i.focus(); document.execCommand('selectAll'); });

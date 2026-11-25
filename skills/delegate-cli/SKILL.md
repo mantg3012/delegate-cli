@@ -1,6 +1,6 @@
 ---
 name: delegate-cli
-description: Light audit, write a spec, then hand a coding task to another CLI agent (default gemini with an API key; codex, opencode; agy/Antigravity only when the user names it) running headless in the Terminal panel, monitor progress, answer its questions and verify the result. Use when the user says "delegate", "give it to gemini/agy/codex/opencode", "let a sub-agent do it", "run it in the terminal and watch", or picks a model/effort for an external agent ("giao cho gemini/agy/codex", "để sub-agent làm"). Do not use ai-task.
+description: Light audit, write a spec, then hand a coding task to another CLI agent (default gemini with an API key; codex, opencode; agy/Antigravity only when the user names it) running headless in the Terminal panel, monitor progress, answer its questions and verify the result. Use when the user says "delegate", "give it to gemini/agy/codex/opencode", "let a sub-agent do it", "run it in the terminal and watch", or picks a model/effort for an external agent ("giao cho gemini/agy/codex/opencode", "để sub-agent làm", "chạy terminal và theo dõi", chọn model/effort cho agent ngoài). Do not use ai-task.
 ---
 
 # Delegate a task to a CLI agent through the terminal
