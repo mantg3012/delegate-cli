@@ -1,17 +1,19 @@
-# ag: drive the Antigravity desktop app from the shell
+# delegate + ag: Claude Code as coordinator, CLI agents as workers
 
-Lets Claude Code (or another agent) hand work to the Antigravity desktop app's agent and supervise it from the shell.
+Lets Claude Code plan and hand work to worker agents (Codex CLI or the Antigravity desktop app's agent, picked per task), answer their questions and read short reports, so Claude spends few tokens.
 
 | Part | What it is |
 | --- | --- |
 | `ag.mjs` → `ag` | CLI that drives the **Antigravity desktop app's** agent: send a prompt and print the reply, approve or reject commands, switch conversations, models and projects. One file, plain Node, no `npm install`. |
 | `skills/antigravity-desktop/` | Claude Code skill that teaches the agent to use `ag`. |
+| `skills/delegate/` | Claude Code skill (Vietnamese), `/delegate` asks Codex or Antigravity (or `/delegate codex …`): spec → worker → compact JSON report, answering worker questions by resume, read-only review, parallel workers in git worktrees. Scripts in `scripts/`, per-worker details in `references/`. |
 
 `ag` prints short plain text, so an agent can read results without screenshots.
 
 ## Requirements
 - macOS. Windows/Linux untested; the script may work, but you must launch the app with the debug flags yourself.
-- Node 22+ (built-in `fetch` and `WebSocket`). Check: `node -v`.
+- Node 22+ (built-in `fetch` and `WebSocket`; `ag usage` needs `node:sqlite`, Node 22.13+). Check: `node -v`.
+- For `delegate` with Codex: Codex CLI 0.169+ (scripts pass `--trust`; measured on 0.172), Python 3.11+, zsh, git.
 - The Antigravity desktop app.
 
 ## Install
@@ -20,7 +22,7 @@ Lets Claude Code (or another agent) hand work to the Antigravity desktop app's a
    ```bash
    ./install.sh
    ```
-   It checks Node 22+, links `ag` into `~/.local/bin`, links the skill into `~/.claude/skills/antigravity-desktop`, and adds `~/.local/bin` to PATH in `~/.zshrc` if missing. A real (non-symlink) skill folder already there is moved to `~/.claude/skills-backup/`; a leftover `delegate-cli` skill link from older versions is removed. Safe to run again.
+   It checks Node 22+, links `ag` into `~/.local/bin`, links the skills into `~/.claude/skills/antigravity-desktop` and `~/.claude/skills/delegate`, and adds `~/.local/bin` to PATH in `~/.zshrc` if missing. A real (non-symlink) skill folder already there is moved to `~/.claude/skills-backup/`. A `delegate-cli` link from older versions is removed. Safe to run again.
 3. Open a new terminal tab (or `source ~/.zshrc`).
 4. Quit Antigravity completely (Cmd+Q), then reopen it with the debug flag:
    ```bash
@@ -49,6 +51,7 @@ ag list / ag open <id> / ag new
 ag project                      # projects and their folders; [cwd] = this folder's project
 ag model                        # list models
 ag model hydrogen high          # pick Gemini 4 Hydrogen, effort High (after ag new)
+ag usage [<id>]                 # tokens of a conversation (cached %, context, age) from the local DB
 ag stop                         # stop the agent
 ag help                         # every command and option
 ```
@@ -73,3 +76,15 @@ Antigravity keeps each project's folders in `~/.gemini/config/projects/*.json`. 
 - `ag ask --new` creates a new conversation in the sidebar every time.
 - **When Antigravity updates**, its UI may change and break `ag`. Run `ag doctor`; a `FAIL` line names the selector to fix in the `SEL` block at the top of `ag.mjs`.
 - Tested against the Antigravity UI of 2026-11-25.
+
+## delegate in short
+In Claude Code: `/delegate` shows a picker (Codex / Antigravity); `/delegate codex <task>` or `/delegate antigravity <task>` skips it. Codex scripts:
+```bash
+d=~/.claude/skills/delegate/scripts
+python3 $d/codex_env.py <repo>             # Codex environment snapshot, prints only what changed
+zsh $d/t-run.sh <slug> 1                     # worker runs .ai/specs/<slug>.md, prints a compact report + usage line
+zsh $d/t-resume.sh <slug> 2 <answer-file>    # answer its questions; refuses when the session is cold (cache gone)
+MODE=review zsh $d/t-run.sh <slug>-review 1  # read-only reviewer
+zsh $d/t-wave.sh new|run|resume|collect|rm <wave> <name>   # parallel workers, one git worktree each
+```
+Self-tests: `python3 $d/report.py --selftest`, `python3 $d/codex_env.py --selftest`, `zsh $d/t-wave.sh --selftest`, `ag usage --selftest`.

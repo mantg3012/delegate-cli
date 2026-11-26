@@ -1,0 +1,26 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["status", "summary", "files_changed", "checks", "acceptance", "tests", "findings", "artifacts", "open_questions"],
+  "properties": {
+    "status": { "type": "string", "enum": ["done", "blocked", "needs_answer"] },
+    "summary": { "type": "string", "description": "Conclusion in at most 300 characters." },
+    "files_changed": { "type": "array", "items": { "type": "string" } },
+    "checks": { "type": "array", "items": { "type": "string", "description": "exit=<code> <command> - <at most 80 chars>" } },
+    "acceptance": { "type": "array", "items": { "type": "string", "description": "AC-<n> pass|fail|not_checked <evidence, at most 80 chars>" } },
+    "tests": {
+      "type": ["object", "null"],
+      "description": "Counts from the xcresult or test runner; null when no tests ran.",
+      "additionalProperties": false,
+      "required": ["pass", "fail", "skip"],
+      "properties": {
+        "pass": { "type": "integer" },
+        "fail": { "type": "integer" },
+        "skip": { "type": "integer" }
+      }
+    },
+    "findings": { "type": "array", "items": { "type": "string", "description": "P0-P3|kind|path:line|text of at most 120 chars" } },
+    "artifacts": { "type": "array", "items": { "type": "string", "description": "Path of a detail file: notes, summary.json, screenshot, xcresult." } },
+    "open_questions": { "type": "array", "items": { "type": "string", "description": "Q<n>: question. Recommended: <answer>" } }
+  }
+}

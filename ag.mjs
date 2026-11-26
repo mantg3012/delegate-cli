@@ -261,6 +261,8 @@ const HELP = `ag — control the Antigravity desktop app (CDP on 127.0.0.1:${POR
   ag click "<button text>"       click any button in the conversation
   ag model ["<name>" [low|medium|high|extra]]
                                  no args: list models; else pick one (name can be partial, e.g. hydrogen high)
+  ag usage [<conversation-id>]   tokens of a conversation from the app's local DB (default: most recently active):
+                                 turns, new input, cached %, output, context/limit, minutes since last activity
   ag stop                        stop the running agent
   ag screenshot [file.png]       save a screenshot (debug only)
   ag doctor                      check every selector still matches the UI
@@ -282,10 +284,61 @@ async function start() {
   die(`Antigravity opened but CDP did not answer on 127.0.0.1:${PORT} within 30s`);
 }
 
+// Raw protobuf -> {'/1/4/2': n, ...} (varints only, last value wins); nested bytes decoded when they parse.
+function pbFields(b, path = '', out = {}, depth = 0) {
+  let i = 0;
+  const varint = () => { let r = 0, s = 0, x; do { if (i >= b.length) throw 0; x = b[i++]; r += (x & 0x7f) * 2 ** s; s += 7; } while (x & 0x80); return r; };
+  while (i < b.length) {
+    const k = varint(), f = `${path}/${Math.floor(k / 8)}`, wt = k & 7;
+    if (wt === 0) out[f] = varint();
+    else if (wt === 2) {
+      const n = varint(), sub = b.subarray(i, i + n); i += n;
+      if (i > b.length) throw 0;
+      if (depth < 4) { const t = {}; try { pbFields(sub, f, t, depth + 1); Object.assign(out, t); } catch {} }
+    } else if (wt === 1) i += 8; else if (wt === 5) i += 4; else throw 0;
+  }
+  return out;
+}
+
+// Token usage of one conversation from the app's local DB, no CDP needed.
+// shortcut: field meanings inferred from data (/1/4/2 new input, /1/4/5 cached, /1/4/3 output, /1/9/10/1 context,
+// /1/9/10/4 context limit); recheck with `ag usage` against a fresh chat after an app update.
+async function usage(id) {
+  if (id && !/^[\w-]+$/.test(id)) die('conversation id looks wrong (see ag list): ' + id);
+  const dir = join(homedir(), '.gemini/antigravity/conversations');
+  const mtime = f => Math.max(...[f, f + '-wal'].map(x => existsSync(x) ? statSync(x).mtimeMs : 0));
+  // shortcut: without an id, takes the most recently active conversation; pass the id from `ag list` when windows run in parallel.
+  // ag list prints 8-char ids; accept any unique prefix
+  const dbs = readdirSync(dir).filter(f => f.endsWith('.db') && (!id || f.startsWith(id))).map(f => join(dir, f));
+  if (id && dbs.length > 1) die(`id prefix "${id}" matches ${dbs.length} conversations; use more characters`);
+  const file = dbs.sort((a, b) => mtime(b) - mtime(a))[0];
+  if (!file) die('no conversation DB ' + (id || 'in ' + dir));
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(file, { readOnly: true });
+  let turns = 0, fresh = 0, cached = 0, out = 0, ctx = 0, limit = 0;
+  for (const { data } of db.prepare('SELECT data FROM gen_metadata ORDER BY idx').all()) {
+    let m; try { m = pbFields(data); } catch { continue; }
+    if (!('/1/4/2' in m)) continue;
+    turns++; fresh += m['/1/4/2']; cached += m['/1/4/5'] || 0; out += m['/1/4/3'] || 0;
+    ctx = m['/1/9/10/1'] || ctx; limit = m['/1/9/10/4'] || limit;
+  }
+  db.close();
+  const k = n => n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : Math.round(n / 1e3) + 'k';
+  const pct = fresh + cached ? Math.round(100 * cached / (fresh + cached)) : 0;
+  console.log(`${basename(file, '.db')}\tturns=${turns} new=${k(fresh)} cached=${pct}% out=${k(out)} ctx=${k(ctx)}/${k(limit)} age=${Math.round((Date.now() - mtime(file)) / 60000)}m`);
+}
+
 const o = parse(process.argv.slice(2));
 const cmd = o._[0];
 if (!cmd || cmd === 'help' || o.help) { console.log(HELP); process.exit(0); }
 if (cmd === 'start') { await start(); process.exit(0); }
+if (cmd === 'usage' && 'selftest' in o) {
+  // {1: {4: {2: 100, 5: 900}, 9: {10: {1: 5000}}}} plus a field-1 string that is not a message
+  const m = pbFields(Uint8Array.from([0x0a, 14, 0x22, 5, 0x10, 100, 0x28, 0x84, 0x07, 0x4a, 5, 0x52, 3, 0x08, 0x88, 0x27, 0x12, 2, 0xff, 0xff]));
+  if (m['/1/4/2'] !== 100 || m['/1/4/5'] !== 900 || m['/1/9/10/1'] !== 5000) die('selftest failed: ' + JSON.stringify(m));
+  console.log('selftest OK'); process.exit(0);
+}
+if (cmd === 'usage') { await usage(o._[1]); process.exit(0); }
 const appWindows = () => fetch(`http://127.0.0.1:${PORT}/json/list`).then(r => r.json(), () => die(`no CDP on 127.0.0.1:${PORT}; run: ag start`))
   .then(l => l.filter(x => x.type === 'page' && /^https:\/\/127\.0\.0\.1:/.test(x.url)));
 if (cmd === 'windows' && !o.new) {

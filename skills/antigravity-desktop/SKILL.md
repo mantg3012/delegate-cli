@@ -23,6 +23,7 @@ description: Drive the Antigravity desktop app's agent from the shell with the `
 | `ag list [-n 10]` / `ag open <id>` / `ag new` | newest chats (short id, age like `6m` or `open`, title) / open one / new-chat page in cwd's project | |
 | `ag project [<name\|path>]` | list projects (`[cwd]`, `[selected]`) / select one on the new-chat page | |
 | `ag model ["<name>" effort]` | list models / pick one, e.g. `ag model hydrogen high` | |
+| `ag usage [<id>]` | tokens of a chat from the app's local DB, no CDP (default: most recently active) | `turns= cached=% ctx=/limit age=m` |
 | `ag stop` | stop the running agent | `stopped` / `not running` |
 | `ag click "<text>"` | click any button in the conversation (fallback) | `clicked: …` |
 
@@ -47,14 +48,15 @@ Decide before every `ask`. A new chat costs ~17k tokens to start plus re-reading
 
 Continue (`ag open <id>`, then `ag ask` without `--new`) when ALL hold: same topic (follow-up, fix, same files or feature); a chat you used this session or the user named (never write into another of the user's chats on your own); age `open` or ≤ ~15m; fewer than ~15 turns sent.
 Otherwise start a new chat. If it is long, put a short state summary (files touched, done, left) at the top of the prompt. If same-topic context is too costly to restate, continue anyway. Unsure → continue only if your last chat is ≤ ~15m old.
+`ag usage <id>` shows a chat's `age` and `ctx`: cold (> ~15m) and large → a new chat with a summary is cheaper.
 Tell the user in one line: continued `<title>` or new chat, and why.
 
 ## Choosing a model
 User named one → use it. Continuing → keep the chat's model (a change breaks the cache); never change an open chat's model unasked. New chat → lowest tier that fits (Neon ≈ 2x Hydrogen):
 1. Easy (explain, summarize, rename, docs, obvious one-file edit) → `--model "gemini 4 hydrogen medium"`
 2. Normal, default (feature or known-cause fix in 1-3 files, tests, small UI) → `gemini 4 hydrogen high` (used when `--model` is omitted)
-3. Hard (many files, cross-file debugging, interface refactor) → `--model "gemini 4 neon medium"`
-4. Very hard (unknown cause after a try, architecture, migration, concurrency, performance, security, long multi-step) → `--model "gemini 4 neon high"`
+3. Hard (many files, cross-file debugging, interface refactor, long implement-and-test) → `--model "orchestrator"` (planner Neon reads and plans, Hydrogen edits and tests; Google: near-Carbon results, 24% less quota). One agent, not parallel; planner/executor are set in the app (Settings > Models). Label not verified yet: if it fails, `ag model` lists names; fall back to `gemini 4 neon medium`
+4. Very hard (unknown cause after a try, architecture, migration, concurrency, performance, security) → `--model "gemini 4 neon high"`
 
 - Use `ag ask --new --model "<name> <effort>" "…"`; a new chat never inherits the app's last model. Model unavailable → `ag model` to list, fall back to the default, tell the user.
 - Say which tier and why in one line. A tier-1/2 task that fails or gets stuck → retry once a tier up in a new chat.
