@@ -33,7 +33,12 @@ Errors print `ag: <reason>` on stderr and exit 1. `ask` refuses to send while th
 Antigravity projects map to folders (`~/.gemini/config/projects/*.json`). Run `ag` with cwd inside the repo you are working on (Bash cwd, or `cd <repo> && ag …`):
 - `ag new` and `ag ask --new` select the project whose folder contains cwd (deepest match). `--project <name|path>` overrides; `--project keep` leaves the selection alone.
 - `ag ask` without `--new` refuses when the open conversation belongs to another project (the window title ends with ` - <project>`).
-- No project contains cwd → `ag` refuses and lists the projects. Ask the user to create one in the app (project menu > New Project); do not use `--project keep` to send work for one repo into another.
+- No project contains cwd → `ag` creates one for cwd's git root (prints `ag: created Antigravity project ...`). Do not use `--project keep` to send work for one repo into another.
+
+## Parallel tasks: one window each
+Antigravity can open several windows, and each runs its own agent at the same time. `ag windows --new` opens one and prints its id (same as Cmd+Shift+N).
+- `ag windows` lists them (`<id>\t<title>`). Prefix every command with `AG_WINDOW=<id>` to drive that window; without it `ag` uses the first one.
+- Each Claude session that delegates in parallel takes its own window and keeps using the same id. Never drive a window another session uses; if none is free, open one with `ag windows --new`.
 
 ## Approvals
 When `ask`/`wait` end with `[state: waiting-input]`, the output already shows the question, the exact command and numbered options. Read it there; do not call `status` again.
@@ -65,14 +70,14 @@ The user named a model → use it. When continuing a chat, keep its model (a cha
 
 | Tier | Task looks like | Model |
 | --- | --- | --- |
-| 1 Easy | question or explanation, read and summarize, rename, format, comments or docs, a small edit in one file with an obvious change | `ag model "gemini 4 hydrogen" medium` |
-| 2 Normal (default) | one feature or bug fix with a known cause in 1-3 files, tests for a given function, a small UI screen | `ag model "gemini 4 hydrogen" high` |
-| 3 Hard | a feature across many files or modules, debugging across connected files, a refactor that changes interfaces | `ag model "gemini 4 neon" medium` |
-| 4 Very hard | cause unknown after a first attempt, architecture or design, migration, concurrency, performance, security, a long multi-step task | `ag model "gemini 4 neon" high` |
+| 1 Easy | question or explanation, read and summarize, rename, format, comments or docs, a small edit in one file with an obvious change | `--model "gemini 4 hydrogen medium"` |
+| 2 Normal (default) | one feature or bug fix with a known cause in 1-3 files, tests for a given function, a small UI screen | `--model "gemini 4 hydrogen high"` (also what `ag` uses when `--model` is omitted) |
+| 3 Hard | a feature across many files or modules, debugging across connected files, a refactor that changes interfaces | `--model "gemini 4 neon medium"` |
+| 4 Very hard | cause unknown after a first attempt, architecture or design, migration, concurrency, performance, security, a long multi-step task | `--model "gemini 4 neon high"` |
 
 - Cannot tell which tier, or the request is too vague → default: Gemini 4 Hydrogen high.
 - `ag model` fails (model unavailable or renamed) → run `ag model` to list, use the default if it is there, and tell the user.
-- Order: `ag new` → `ag model …` → `ag ask "…"` WITHOUT `--new` (`--new` would open yet another chat).
+- One step: `ag ask --new --model "<name> <effort>" "…"` (or `ag new --model …`). A new chat always gets a set model: without `--model` it is Gemini 4 Hydrogen high, never what the app last had selected. Pass `--model` for tier 1, 3 or 4.
 - Tell the user in one line which model you picked and why (tier).
 - A tier-1/2 task that fails or the agent gets stuck → retry once one tier up in a new chat, and say so.
 

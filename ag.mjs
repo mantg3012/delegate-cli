@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // ag: drive the Antigravity desktop app over CDP. Needs the app started with `ag start`
 // (= open -a Antigravity --args --remote-debugging-port=9222 --remote-debugging-address=127.0.0.1).
-import { writeFileSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { writeFileSync, readdirSync, readFileSync, realpathSync, existsSync, statSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join, resolve, sep } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { basename, join, resolve, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PORT = process.env.AG_PORT || 9222;
 // All UI selectors in one place: fix here when Antigravity updates its UI.
@@ -38,7 +39,7 @@ const SEL = {
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const die = msg => { console.error('ag: ' + msg); process.exit(1); };
 
-// ---- projects: Antigravity keeps one JSON per project with its folders ----
+// Antigravity keeps one JSON per project, listing its folders.
 const PROJECTS_DIR = join(homedir(), '.gemini/config/projects');
 const real = p => { try { return realpathSync(p); } catch { return p; } };
 function projects() {
@@ -60,11 +61,34 @@ function projectFor(dir) {
   return best;
 }
 const projectList = () => projects().map(p => `${p.name}\t${p.dirs.join(', ') || '-'}`).join('\n');
-// --project <name|path> | keep; default: the project of the current directory. null = do not switch.
+const git = (dir, ...a) => { try { return execFileSync('git', ['-C', dir, ...a], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return ''; } };
+// Create a project for dir (its git root if any) the way the app's New Project dialog does;
+// the app picks up new files in PROJECTS_DIR live. The dialog itself needs a native folder picker.
+function createProject(dir) {
+  const d = real(resolve(dir));
+  if (!existsSync(d) || !statSync(d).isDirectory()) return null;
+  const top = git(d, 'rev-parse', '--show-toplevel'), root = top || d;
+  if (root === homedir() || root === sep) die(`refusing to make ${root} an Antigravity project; cd into a repo or pass --project`);
+  const taken = new Set(projects().map(p => p.name.toLowerCase()));
+  let name = basename(root);
+  for (let i = 2; taken.has(name.toLowerCase()); i++) name = `${basename(root)}-${i}`;
+  const branch = git(root, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD').replace(/^origin\//, '') || git(root, 'branch', '--show-current') || 'main';
+  const uri = pathToFileURL(root).href;
+  const id = randomUUID();
+  mkdirSync(PROJECTS_DIR, { recursive: true });
+  writeFileSync(join(PROJECTS_DIR, id + '.json'), JSON.stringify({
+    id, name,
+    projectResources: { resources: [top ? { gitFolder: { folderUri: uri, defaultBranch: branch } } : { folderUri: uri }] },
+    permissionGrants: { v2Migrated: true }, settings: {}, isWorkspaceOnly: false,
+  }, null, 2), { flag: 'wx' });
+  console.error(`ag: created Antigravity project "${name}" for ${root}`);
+  return { name, dirs: [root] };
+}
+// --project <name|path> | keep; default: the project of the current directory (created if missing). null = do not switch.
 function targetProject(v) {
   if (v === 'keep') return null;
-  const p = v ? projects().find(x => x.name.toLowerCase() === v.toLowerCase()) || projectFor(v) : projectFor(process.cwd());
-  if (!p) die(`no Antigravity project contains ${v || process.cwd()}. Create one in the app (project menu > New Project), or pass --project <name> | keep.\nProjects:\n${projectList()}`);
+  const p = v ? projects().find(x => x.name.toLowerCase() === v.toLowerCase()) || projectFor(v) || createProject(v) : projectFor(process.cwd()) || createProject(process.cwd());
+  if (!p) die(`no Antigravity project named or containing "${v}". Pass --project <name|existing dir> | keep.\nProjects:\n${projectList()}`);
   return p;
 }
 
@@ -72,8 +96,8 @@ async function connect() {
   let list;
   try { list = await (await fetch(`http://127.0.0.1:${PORT}/json/list`)).json(); }
   catch { die(`no CDP on 127.0.0.1:${PORT}. Quit Antigravity (Cmd+Q), then run: ag start`); }
-  const t = list.find(x => x.type === 'page' && /^https:\/\/127\.0\.0\.1:/.test(x.url));
-  if (!t) die('Antigravity main window not found');
+  const t = list.find(x => x.type === 'page' && /^https:\/\/127\.0\.0\.1:/.test(x.url) && x.id.startsWith(process.env.AG_WINDOW || ''));
+  if (!t) die('Antigravity main window not found' + (process.env.AG_WINDOW ? ` (AG_WINDOW=${process.env.AG_WINDOW})` : ''));
   const ws = new WebSocket(t.webSocketDebuggerUrl);
   await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = () => bad(new Error('CDP websocket failed')); });
   let id = 0; const pend = new Map();
@@ -89,7 +113,7 @@ async function connect() {
   return { send, run, close: () => ws.close() };
 }
 
-// ---- page-side helpers (serialized into the page) ----
+// Page-side helpers: serialized into the page, so they must be self-contained.
 const pState = S => {
   const card = document.querySelector(S.ask);
   // options are radios; the last one may be a write-in ("No" + free text)
@@ -120,7 +144,6 @@ const pTurns = (S, n) => {
   });
 };
 
-// ---- commands ----
 async function waitIdle(c, timeoutS) {
   const t0 = Date.now();
   // the stop button can appear a beat after send; give it 5s to show up
@@ -141,11 +164,55 @@ async function selectProject(c, name) {
   const now = await cur();
   if (now === null) die('project selector not found; it only exists on the new-chat page (ag new)');
   if (now === name) return;
+  const pick = () => c.run((S, name) => { const i = document.querySelector(`${S.menuProject}[data-project-name="${CSS.escape(name)}"]`); i?.click(); return !!i; }, name);
   await c.run(S => document.querySelector(S.project).click()); await sleep(800);
-  const ok = await c.run((S, name) => { const i = document.querySelector(`${S.menuProject}[data-project-name="${CSS.escape(name)}"]`); i?.click(); return !!i; }, name);
+  let ok = await pick();
+  // a project ag just created can take a moment to reach the menu
+  if (!ok) { await key(c, 'Escape'); await sleep(1500); await c.run(S => document.querySelector(S.project).click()); await sleep(800); ok = await pick(); }
   if (!ok) { await key(c, 'Escape'); die(`project "${name}" is not in the app's project menu`); }
   await sleep(500);
   if ((await cur()) !== name) die(`could not switch project to "${name}"`);
+}
+
+async function selectModel(c, words) {
+  words = [...words];
+  const effort = words.length > 1 && /^(low|medium|high|extra)$/i.test(words.at(-1)) ? words.pop().toLowerCase() : '';
+  const q = words.join(' ').toLowerCase();
+  await c.run(S => document.querySelector(S.model).click()); await sleep(700);
+  const models = await c.run(S => [
+    ...[...document.querySelectorAll(S.menuEffort)].map(g => ({ name: g.dataset.modelBase, effort: true })),
+    ...[...document.querySelectorAll(S.menuModel)].map(m => ({ name: m.dataset.modelLabel, off: m.getAttribute('aria-disabled') === 'true' })),
+  ]);
+  const m = q && (models.find(x => x.name.toLowerCase() === q) || models.find(x => x.name.toLowerCase().includes(q)));
+  if (!m) {
+    await key(c, 'Escape');
+    const lines = models.map(x => x.name + (x.effort ? ' (+effort)' : '') + (x.off ? ' (unavailable)' : ''));
+    if (q) die(`no model matching "${q}". Models:\n${lines.join('\n')}`);
+    console.log(lines.join('\n')); return null;
+  }
+  if (m.off) { await key(c, 'Escape'); die(m.name + ' is unavailable'); }
+  if (m.effort) {
+    if (!effort) { await key(c, 'Escape'); die(`${m.name} needs an effort: low|medium|high|extra`); }
+    // the effort submenu opens on real pointer hover, not on click()
+    const p = await c.run((S, name) => { const r = [...document.querySelectorAll('[role=menuitem]')].find(e => e.innerText.split('\n')[0] === name).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }, m.name);
+    for (const dx of [0, 5, 10]) await c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x + dx, y: p.y });
+    await sleep(500);
+    const ok = await c.run((S, effort) => { const b = [...[...document.querySelectorAll('[role=menu]')].pop().querySelectorAll('[role=menuitemradio]')].find(e => e.innerText.trim().toLowerCase() === effort); b?.click(); return !!b; }, effort);
+    if (!ok) { await key(c, 'Escape'); die(`effort "${effort}" not offered for ${m.name}`); }
+  } else await c.run((S, name) => document.querySelector(`${S.menuModel}[data-model-label="${CSS.escape(name)}"]`).click(), m.name);
+  await sleep(500);
+  return c.run(S => document.querySelector(S.model).innerText.trim());
+}
+
+
+// New chats get a known model, never whatever the new-chat page last had (it may be a costly one).
+const DEFAULT_MODEL = 'gemini 4 hydrogen high';
+async function newChat(c) {
+  const p = targetProject(o.project);
+  await c.run(S => document.querySelector(S.newChat).click()); await sleep(800);
+  if (p) await selectProject(c, p.name);
+  const m = o.model === 'keep' ? null : await selectModel(c, (o.model || DEFAULT_MODEL).split(/\s+/));
+  return `project: ${p?.name ?? 'unchanged'}, model: ${m ?? 'unchanged'}`;
 }
 
 const askText = s => s.ask ? `\n${s.ask.question}${s.ask.command ? `\n$ ${s.ask.command}` : ''}\n${s.ask.options.join('\n')}\n(reply with: ag answer <n>)` : '';
@@ -170,16 +237,18 @@ function parse(argv) {
 
 const HELP = `ag — control the Antigravity desktop app (CDP on 127.0.0.1:${PORT})
   ag status                      state (idle|running|waiting-input), conversation, model, pending question
-  ag ask "<prompt>" [--new] [--no-wait] [--timeout 600] [--max-chars 4000] [--project <name|path|keep>]
+  ag ask "<prompt>" [--new [--model "<name> <effort>"|keep]] [--no-wait] [--timeout 600] [--max-chars 4000] [--project <name|path|keep>]
                                  send a prompt; by default waits and prints the agent's reply.
                                  --new picks the Antigravity project that contains the current directory
-                                 (or --project); without --new it refuses if the open chat is another project's
+                                 (or --project) and sets --model (default: gemini 4 hydrogen high; keep = leave as is);
+                                 without --new it refuses if the open chat is another project's
   ag project [<name|path>]       list projects (folder, [cwd], [selected]) / select one on the new-chat page
   ag wait [--timeout 600]        wait until the agent stops running
   ag last [-n 2] [--max-chars 4000]   print the last n turns
   ag list                        conversations in the sidebar (id, age since last activity or "open", title)
   ag open <conversation-id>      open a conversation
-  ag new [--project <name|path|keep>]  start a new conversation in the current directory's project
+  ag new [--project <name|path|keep>] [--model "<name> <effort>"|keep]
+                                 start a new conversation in the current directory's project, default model as above
   ag answer <n> ["text"]         answer the pending card: pick option n (e.g. 1 = allow once,
                                  last = No + optional text for the agent); ag answer skip
   ag click "<button text>"       click any button in the conversation
@@ -188,7 +257,9 @@ const HELP = `ag — control the Antigravity desktop app (CDP on 127.0.0.1:${POR
   ag stop                        stop the running agent
   ag screenshot [file.png]       save a screenshot (debug only)
   ag doctor                      check every selector still matches the UI
-  ag start                       open Antigravity with CDP enabled (macOS; quit the app first)`;
+  ag start                       open Antigravity with CDP enabled (macOS; quit the app first)
+  ag windows [--new]             list app windows / open a new one and print its id.
+                                 AG_WINDOW=<id> ag ... drives that window (default: the first); one window per parallel task.`;
 
 const cdpUp = () => fetch(`http://127.0.0.1:${PORT}/json/version`).then(r => r.ok, () => false);
 
@@ -208,18 +279,34 @@ const o = parse(process.argv.slice(2));
 const cmd = o._[0];
 if (!cmd || cmd === 'help' || o.help) { console.log(HELP); process.exit(0); }
 if (cmd === 'start') { await start(); process.exit(0); }
+const appWindows = () => fetch(`http://127.0.0.1:${PORT}/json/list`).then(r => r.json(), () => die(`no CDP on 127.0.0.1:${PORT}; run: ag start`))
+  .then(l => l.filter(x => x.type === 'page' && /^https:\/\/127\.0\.0\.1:/.test(x.url)));
+if (cmd === 'windows' && !o.new) {
+  console.log((await appWindows()).map(x => `${x.id.slice(0, 8)}\t${x.title.replace(/ - Antigravity$/, '')}`).join('\n'));
+  process.exit(0);
+}
 const c = await connect();
 const timeout = Number(o.timeout || 600), maxChars = Number(o['max-chars'] || 4000);
 
 try {
   switch (cmd) {
+    case 'windows': {
+      // the app opens a window on Cmd+Shift+N from its page's before-input-event, which CDP key events reach
+      const before = new Set((await appWindows()).map(x => x.id));
+      for (const type of ['rawKeyDown', 'keyUp']) await c.send('Input.dispatchKeyEvent', { type, key: 'N', code: 'KeyN', windowsVirtualKeyCode: 78, nativeVirtualKeyCode: 45, modifiers: 4 | 8 }); // 45 = macOS key code for N; without it the app ignores the key
+      for (let i = 0; i < 20; i++) {
+        const w = (await appWindows()).find(x => !before.has(x.id));
+        if (w) { console.log(w.id.slice(0, 8)); break; }
+        if (i === 19) die('no new window appeared; press Cmd+Shift+N in the app');
+        await sleep(500);
+      }
+      break;
+    }
+
     case 'status': console.log(JSON.stringify(await c.run(pState))); break;
 
     case 'new': {
-      const p = targetProject(o.project);
-      await c.run(S => document.querySelector(S.newChat).click()); await sleep(800);
-      if (p) await selectProject(c, p.name);
-      console.log('ok' + (p ? ` (project: ${p.name})` : '')); break;
+      console.log(`ok (${await newChat(c)})`); break;
     }
 
     case 'project': {
@@ -236,18 +323,15 @@ try {
     case 'ask': {
       const text = o._.slice(1).join(' ');
       if (!text) die('ask needs a prompt');
-      if (o.new) {
-        const p = targetProject(o.project);
-        await c.run(S => document.querySelector(S.newChat).click()); await sleep(800);
-        if (p) await selectProject(c, p.name);
-      }
+      if (o.model && !o.new) die('--model only applies with --new; to change the open chat\'s model use ag model');
+      if (o.new) console.error(`ag: new chat (${await newChat(c)})`);
       const before = await c.run(pState);
       if (before.state !== 'idle') die(`agent is ${before.state}; use ag wait / ag stop first`);
       if (!o.new && o.project !== 'keep') {
         // the window title is "<conversation> - <project>"; refuse to send work for one repo into another repo's chat
-        const want = targetProject(o.project); // dies when the directory belongs to no project
+        const want = targetProject(o.project);
         const has = projects().find(x => before.conversation.endsWith(' - ' + x.name));
-        if (before.url === '/') await selectProject(c, want.name); // new-chat page: make sure it is this repo's project
+        if (before.url === '/') await selectProject(c, want.name);
         else if (has && has.name !== want.name) die(`open conversation is in project "${has.name}", not "${want.name}". Use --new, ag open <id>, or --project keep`);
       }
       const prevAgents = await c.run(S => document.querySelectorAll(S.agent).length);
@@ -326,35 +410,7 @@ try {
       console.log('ok'); break;
     }
 
-    case 'model': {
-      const words = o._.slice(1);
-      const effort = words.length > 1 && /^(low|medium|high|extra)$/i.test(words.at(-1)) ? words.pop().toLowerCase() : '';
-      const q = words.join(' ').toLowerCase();
-      await c.run(S => document.querySelector(S.model).click()); await sleep(700);
-      const models = await c.run(S => [
-        ...[...document.querySelectorAll(S.menuEffort)].map(g => ({ name: g.dataset.modelBase, effort: true })),
-        ...[...document.querySelectorAll(S.menuModel)].map(m => ({ name: m.dataset.modelLabel, off: m.getAttribute('aria-disabled') === 'true' })),
-      ]);
-      const m = q && (models.find(x => x.name.toLowerCase() === q) || models.find(x => x.name.toLowerCase().includes(q)));
-      if (!m) {
-        await key(c, 'Escape');
-        const lines = models.map(x => x.name + (x.effort ? ' (+effort)' : '') + (x.off ? ' (unavailable)' : ''));
-        if (q) die(`no model matching "${q}". Models:\n${lines.join('\n')}`);
-        console.log(lines.join('\n')); break;
-      }
-      if (m.off) { await key(c, 'Escape'); die(m.name + ' is unavailable'); }
-      if (m.effort) {
-        if (!effort) { await key(c, 'Escape'); die(`${m.name} needs an effort: low|medium|high|extra`); }
-        // the effort submenu opens on real pointer hover, not on click()
-        const p = await c.run((S, name) => { const r = [...document.querySelectorAll('[role=menuitem]')].find(e => e.innerText.split('\n')[0] === name).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; }, m.name);
-        for (const dx of [0, 5, 10]) await c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x + dx, y: p.y });
-        await sleep(500);
-        const ok = await c.run((S, effort) => { const b = [...[...document.querySelectorAll('[role=menu]')].pop().querySelectorAll('[role=menuitemradio]')].find(e => e.innerText.trim().toLowerCase() === effort); b?.click(); return !!b; }, effort);
-        if (!ok) { await key(c, 'Escape'); die(`effort "${effort}" not offered for ${m.name}`); }
-      } else await c.run((S, name) => document.querySelector(`${S.menuModel}[data-model-label="${CSS.escape(name)}"]`).click(), m.name);
-      await sleep(500);
-      console.log(await c.run(S => document.querySelector(S.model).innerText.trim())); break;
-    }
+    case 'model': { const m = await selectModel(c, o._.slice(1)); if (m) console.log(m); break; }
 
     case 'stop': {
       const ok = await c.run(S => { const b = document.querySelector(S.stop); if (b) b.click(); return !!b; });

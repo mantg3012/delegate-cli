@@ -38,6 +38,7 @@ Run `./install.sh` in this folder. Do not run `ag start` and do not quit Antigra
 ```bash
 ag status                       # idle | running | waiting-input, open conversation, model
 ag ask --new "Summarize README" # new chat in this folder's project, send, wait, print the reply
+ag ask --new --model "gemini 4 neon high" "…"  # new chats default to gemini 4 hydrogen high
 ag ask "Continue"               # send into the OPEN conversation (refused if it is another project's)
 ag ask --no-wait "..."          # send and return at once; later: ag wait
 ag answer 1                     # approve the command the agent asks to run (1 = allow once)
@@ -53,11 +54,16 @@ ag help                         # every command and option
 ```
 Errors print `ag: <reason>` and exit 1.
 
+### Parallel tasks: one window each
+Antigravity can open several windows, and each runs its own agent at the same time. `ag windows --new` opens one and prints its id (same as Cmd+Shift+N).
+- `ag windows` lists them (`<id>\t<title>`). Prefix every command with `AG_WINDOW=<id>` to drive that window; without it `ag` uses the first one.
+- Each Claude session that delegates in parallel takes its own window and keeps using the same id. Never drive a window another session uses; if none is free, open one with `ag windows --new`.
+
 ### Projects follow the folder you run `ag` in
 Antigravity keeps each project's folders in `~/.gemini/config/projects/*.json`. `ag` matches the current directory against them (deepest folder wins), so an agent that runs `ag` from the repo it works on talks to the right Antigravity project:
 - `ag new` and `ag ask --new` select that project on the new-chat page.
 - `ag ask` without `--new` refuses when the open conversation (window title `<chat> - <project>`) belongs to a different project.
-- No project contains the folder → `ag` refuses and lists the projects. Create one in the app (project menu > New Project).
+- No project contains the folder → `ag` creates one for it (its git root, named after the folder; the app picks it up live). It refuses only for `~` and `/`.
 - Override with `--project <name|path>`; `--project keep` skips the check and leaves the selection as it is.
 
 ## Good to know
