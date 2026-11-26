@@ -21,6 +21,8 @@ const SEL = {
   agent: '[data-testid=agent-response]',
   userText: '[data-testid=user-message-content]',
   worked: '[data-testid=worked-for-collapsible]',
+  turnCards: '[data-testid=turn-cards-container]', // "2 files changed +74 -5 Review" footer
+  mention: 'bdi.context-scope-mention', // inline file chips; their flex span adds newlines to innerText
   model: '[data-testid=model-selector-trigger]',
   project: '[data-testid=project-selector-trigger]', // new-chat page only; aria-label "Select project, current: <name>"
   menuProject: '[data-testid=project-selector-item]', // inside the project menu; data-project-name
@@ -140,6 +142,11 @@ const pTurns = (S, n) => {
     let text = el.innerText.replace(/^\s*Agent said\s*/, '');
     const worked = el.querySelector(S.worked)?.innerText.trim();
     if (worked) text = text.replace(worked, '');
+    const cards = el.querySelector(S.turnCards)?.innerText.trim();
+    if (cards) text = text.replace(cards, `[${cards.replace(/\s*\n\s*/g, ' ').replace(/ Review$/, '')}]`);
+    // a chip inside a sentence renders as " \nname\n "; join it back into the line
+    for (const m of new Set([...el.querySelectorAll(S.mention)].map(e => e.innerText.trim()).filter(Boolean)))
+      text = text.split(` \n${m}`).join(` ${m}`).split(`${m}\n `).join(`${m} `);
     return { role: 'agent', text: text.trim() };
   });
 };
@@ -245,7 +252,7 @@ const HELP = `ag — control the Antigravity desktop app (CDP on 127.0.0.1:${POR
   ag project [<name|path>]       list projects (folder, [cwd], [selected]) / select one on the new-chat page
   ag wait [--timeout 600]        wait until the agent stops running
   ag last [-n 2] [--max-chars 4000]   print the last n turns
-  ag list                        conversations in the sidebar (id, age since last activity or "open", title)
+  ag list [-n 10]                newest n sidebar conversations (short id, age since last activity or "open", title)
   ag open <conversation-id>      open a conversation
   ag new [--project <name|path|keep>] [--model "<name> <effort>"|keep]
                                  start a new conversation in the current directory's project, default model as above
@@ -303,7 +310,7 @@ try {
       break;
     }
 
-    case 'status': console.log(JSON.stringify(await c.run(pState))); break;
+    case 'status': { const { url, ...s } = await c.run(pState); console.log(JSON.stringify(s)); break; }
 
     case 'new': {
       console.log(`ok (${await newChat(c)})`); break;
@@ -362,15 +369,16 @@ try {
       // second line of a row is its age (6m, 2h); the open row shows none
       const rows = await c.run(S => [...document.querySelectorAll(S.convRow)].map(r => {
         const l = r.innerText.split('\n').map(s => s.trim()).filter(Boolean);
-        return `${r.dataset.cascadeId}\t${r.dataset.selected === 'true' ? 'open' : l.length > 1 ? l.at(-1) : '-'}\t${l[0]}`;
+        return `${r.dataset.cascadeId.slice(0, 8)}\t${r.dataset.selected === 'true' ? 'open' : l.length > 1 ? l.at(-1) : '-'}\t${l[0]}`;
       }));
-      console.log(rows.join('\n')); break;
+      console.log(rows.slice(0, Number(o.n || 10)).join('\n')); break;
     }
 
     case 'open': {
       const id = o._[1]; if (!id) die('open needs a conversation id (see ag list)');
-      const ok = await c.run((S, id) => { const a = document.querySelector(`${S.convRow}[data-cascade-id="${CSS.escape(id)}"] a`); if (a) a.click(); return !!a; }, id);
-      if (!ok) die('conversation not found in sidebar: ' + id);
+      // ag list prints 8-char ids; accept any unique prefix of the full id
+      const n = await c.run((S, id) => { const a = document.querySelectorAll(`${S.convRow}[data-cascade-id^="${CSS.escape(id)}"] a`); if (a.length === 1) a[0].click(); return a.length; }, id);
+      if (n !== 1) die(n ? `id prefix "${id}" matches ${n} conversations; use more characters` : 'conversation not found in sidebar: ' + id);
       await sleep(1200); console.log('ok'); break;
     }
 
@@ -427,7 +435,7 @@ try {
       // conversation-only selectors are only checked when a conversation is open
       const r = await c.run(S => Object.fromEntries(Object.entries(S).map(([k, v]) => [k, document.querySelectorAll(v).length])));
       const inConv = r.convView > 0;
-      const optional = new Set(['stop', 'send', 'worked', ...Object.keys(r).filter(k => /^(ask|menu)/.test(k)),...(inConv ? ['project'] : ['convView', 'user', 'userText', 'agent'])]);
+      const optional = new Set(['stop', 'send', 'worked', 'turnCards', 'mention',...Object.keys(r).filter(k => /^(ask|menu)/.test(k)),...(inConv ? ['project'] : ['convView', 'user', 'userText', 'agent'])]);
       let bad = 0;
       for (const [k, n] of Object.entries(r)) if (!n && !optional.has(k)) { bad++; console.log(`FAIL ${k}: ${SEL[k]}`); }
       if (bad) process.exitCode = 1; else console.log(`ok: all ${Object.keys(r).length} selectors match`); break;
